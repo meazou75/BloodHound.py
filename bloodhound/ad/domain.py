@@ -26,6 +26,7 @@ import logging
 import traceback
 import codecs
 import json
+from time import time, sleep
 
 from uuid import UUID
 from dns import resolver
@@ -37,6 +38,8 @@ from bloodhound.ad.utils import ADUtils, DNSCache, SidCache, SamCache, Collectio
 from bloodhound.ad.computer import ADComputer
 from bloodhound.enumeration.objectresolver import ObjectResolver
 from future.utils import itervalues, iteritems, native_str
+
+
 
 """
 Active Directory Domain Controller
@@ -53,6 +56,16 @@ class ADDC(ADComputer):
         self.gcldap = None
         # Initialize GUID map
         self.objecttype_guid_map = dict()
+
+        # last request timestamp
+        self.last_search_ts = time()
+        # minimum time between searches
+        self.min_search_delay = 2
+        # request counter
+        self.query_counter = 0
+        # max rate
+        self.max_result_rate = 100
+
 
     def ldap_connect(self, protocol='ldap', resolver=False):
         """
@@ -152,18 +165,26 @@ class ADDC(ADComputer):
         sresult = searcher.extend.standard.paged_search(search_base,
                                                         search_filter,
                                                         attributes=attributes,
-                                                        paged_size=200,
+                                                        paged_size=50,
                                                         search_scope=search_scope,
                                                         controls=controls,
                                                         generator=generator)
         try:
             # Use a generator for the result regardless of if the search function uses one
+            start = time()
+            while time() - self.last_search_ts < self.min_search_delay:
+                sleep(0.9)
+            query_counter = 0
             for e in sresult:
                 if e['type'] != 'searchResEntry':
                     continue
                 if not hadresults:
                     hadresults = True
+                while query_counter / (time()-start) > self.max_result_rate:
+                    sleep(0.9)
+                query_counter += 1
                 yield e
+            self.last_search_ts = time()
         except LDAPNoSuchObjectResult:
             # This may indicate the object doesn't exist or access is denied
             logging.warning('LDAP Server reported that the search in %s for %s does not exist.', search_base, search_filter)
@@ -242,10 +263,18 @@ class ADDC(ADComputer):
         sresult = self.ldap.extend.standard.paged_search(self.ldap.server.info.other['schemaNamingContext'][0],
                                                          '(objectClass=*)',
                                                          attributes=['name', 'schemaidguid'])
+        start = time()
+        while time() - self.last_search_ts < self.min_search_delay:
+            sleep(0.9)
+        query_counter = 0
         for res in sresult:
+            while query_counter / (time() - start) > self.max_result_rate:
+                sleep(0.9)
+            query_counter += 1
             if res['attributes']['schemaIDGUID']:
                 guid = str(UUID(bytes_le=res['attributes']['schemaIDGUID']))
                 self.objecttype_guid_map[res['attributes']['name'].lower()] = guid
+        self.last_search_ts = time()
 
         if 'ms-mcs-admpwdexpirationtime' in self.objecttype_guid_map:
             logging.debug('Found LAPS attributes in schema')
@@ -406,6 +435,20 @@ class ADDC(ADComputer):
         return entries
 
     def get_users(self, include_properties=False, acl=False):
+        # Query for GMSA only if server supports it
+        if 'msDS-GroupManagedServiceAccount' in self.ldap.server.schema.object_classes:
+            query = '(|(&(objectCategory=person)(objectClass=user))(objectClass=msDS-GroupManagedServiceAccount))'
+        else:
+            logging.debug('No support for GMSA, skipping in query')
+            query = '(&(objectCategory=person)(objectClass=user))'
+
+        #first, get all user and gmsa accounts' names
+        properties = ['sAMAccountName']
+        samaccountnames = list()
+        entries = self.search(query, properties, generator=True)
+        for entry in entries:
+            samaccountnames.append(entry['attributes']['sAMAccountName'])
+
 
         properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
                       'objectSid', 'primaryGroupID', 'isDeleted']
@@ -422,17 +465,30 @@ class ADDC(ADComputer):
         if acl:
             properties.append('nTSecurityDescriptor')
 
-        # Query for GMSA only if server supports it
-        if 'msDS-GroupManagedServiceAccount' in self.ldap.server.schema.object_classes:
-            query = '(|(&(objectCategory=person)(objectClass=user))(objectClass=msDS-GroupManagedServiceAccount))'
-        else:
-            logging.debug('No support for GMSA, skipping in query')
-            query = '(&(objectCategory=person)(objectClass=user))'
-        entries = self.search(query,
-                              properties,
-                              generator=True,
-                              query_sd=acl)
-        return entries
+
+        max_result_size = 25
+        final_entries = list()
+        samaccountnames = [name.lower() for name in samaccountnames]
+        samaccountnames.sort()
+
+        while samaccountnames:
+            target = samaccountnames[0]
+            prefix = ""
+            while prefix != target and len([name for name in samaccountnames if name.startswith(prefix)]) > max_result_size:
+                prefix += target[len(prefix)]
+            precise_query = f"(&{query}(sAMAccountName={prefix}*))"
+            entries = self.search(precise_query,
+                                  properties,
+                                  generator=True,
+                                  query_sd=acl)
+            for entry in entries:
+                final_entries.append(entry)
+                samaccountname = entry['attributes']['sAMAccountName'].lower()
+                if samaccountname in samaccountnames:
+                    samaccountnames.remove(samaccountname)
+
+
+        return final_entries
 
 
     def get_computers(self, include_properties=False, acl=False):
@@ -510,7 +566,7 @@ class ADDC(ADComputer):
                               search_base=dn,
                               search_scope=LEVEL,
                               use_resolver=use_resolver)
-                              
+
         return entries
 
     def get_trusts(self):

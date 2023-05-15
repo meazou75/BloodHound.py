@@ -267,7 +267,7 @@ def main():
     if args.username is not None and args.password is not None:
         logging.debug('Authentication: username/password')
         auth = ADAuthentication(username=args.username, password=args.password, domain=args.domain, auth_method=args.auth_method)
-    elif args.username is not None and args.password is None and args.hashes is None:
+    elif args.username is not None and args.password is None and args.hashes is None and not args.no_pass:
         args.password = getpass.getpass()
         auth = ADAuthentication(username=args.username, password=args.password, domain=args.domain, auth_method=args.auth_method)
     elif args.username is None and (args.password is not None or args.hashes is not None):
@@ -331,7 +331,7 @@ def main():
         else:
             auth.get_tgt()
 
-    # For adding timestamp prefix to the outputfiles 
+    # For adding timestamp prefix to the outputfiles
     timestamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y%m%d%H%M%S') + "_"
     bloodhound = BloodHound(ad)
     bloodhound.connect()
@@ -342,7 +342,7 @@ def main():
                    computerfile=args.computerfile,
                    cachefile=args.cachefile,
                    exclude_dcs=args.exclude_dcs)
-    #If args --zip is true, the compress output  
+    #If args --zip is true, the compress output
     if args.zip:
         logging.info("Compressing output into " + timestamp + "bloodhound.zip")
         # Get a list of files in the current dir
