@@ -26,7 +26,7 @@ import logging
 import codecs
 import json
 
-MAX_ENTRIES = 40000
+MAX_ENTRIES = 2000
 
 class OutputWorker(object):
     @staticmethod
@@ -35,7 +35,7 @@ class OutputWorker(object):
             Worker to write the results from the results_q to the given files.
         """
 
-      
+
         computers_out = codecs.open(computers_filename, 'w', 'utf-8')
         filenumber = 0
 

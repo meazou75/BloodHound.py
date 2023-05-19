@@ -429,7 +429,7 @@ class MembershipEnumerator(object):
                 "IsACLProtected": False,
                 "Aces": [],
             }
-            
+
             if with_properties:
                 gpo["Properties"]["description"] = ADUtils.get_entry_property(entry, 'description')
                 whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
@@ -519,12 +519,12 @@ class MembershipEnumerator(object):
                 },
             }
 
-            
+
             if with_properties:
                 ou["Properties"]["description"] = ADUtils.get_entry_property(entry, 'description')
                 whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
                 ou["Properties"]["whencreated"] =  calendar.timegm(whencreated.timetuple())
-            
+
             for childentry in self.addc.get_childobjects(ou["Properties"]["distinguishedname"]):
                 resolved_childentry = ADUtils.resolve_ad_entry(childentry)
                 out_object = {
@@ -532,7 +532,7 @@ class MembershipEnumerator(object):
                     "ObjectType":resolved_childentry['type']
                 }
                 ou["ChildObjects"].append(out_object)
-            
+
             for gplink_dn, options in ADUtils.parse_gplink_string(ADUtils.get_entry_property(entry, 'gPLink', '')):
                 link = dict()
                 link['IsEnforced'] = options == 2
@@ -541,7 +541,7 @@ class MembershipEnumerator(object):
                     ou['Links'].append(link)
                 except TypeError:
                     logging.warning('Could not resolve GPO link to {0}'.format(gplink_dn))
-            
+
             # Create cache entry for links
             link_output = {
                 "ObjectIdentifier": ou['ObjectIdentifier'],
@@ -619,12 +619,12 @@ class MembershipEnumerator(object):
                 "ChildObjects": [],
             }
 
-            
+
             if with_properties:
                 container["Properties"]["description"] = ADUtils.get_entry_property(entry, 'description', '')
                 whencreated = ADUtils.get_entry_property(entry, 'whencreated', default=0)
                 container["Properties"]["whencreated"] =  calendar.timegm(whencreated.timetuple())
-            
+
             for childentry in self.addc.get_childobjects(container["Properties"]["distinguishedname"]):
                 if ADUtils.is_filtered_container_child(ADUtils.get_entry_property(childentry, 'distinguishedName')):
                     continue
@@ -634,7 +634,7 @@ class MembershipEnumerator(object):
                     "ObjectType":resolved_childentry['type']
                 }
                 container["ChildObjects"].append(object)
-            
+
             # Create cache entry for links
             link_output = {
                 "ObjectIdentifier": container['ObjectIdentifier'],
@@ -794,15 +794,20 @@ class MembershipEnumerator(object):
 
     def do_container_collection(self, timestamp=""):
         self.enumerate_gpos(timestamp)
+        self.addomain.save_cachefile(cachefile=timestamp + "additionnal_cache.json")
         self.enumerate_ous(timestamp)
+        self.addomain.save_cachefile(cachefile=timestamp + "additionnal_cache.json")
         self.enumerate_containers(timestamp)
+        self.addomain.save_cachefile(cachefile=timestamp + "additionnal_cache.json")
 
     def enumerate_memberships(self, timestamp=""):
         """
         Run appropriate enumeration tasks
         """
         self.enumerate_users(timestamp)
+        self.addomain.save_cachefile(cachefile=timestamp + "additionnal_cache.json")
         self.enumerate_groups(timestamp)
+        self.addomain.save_cachefile(cachefile=timestamp + "additionnal_cache.json")
         if 'container' in self.collect:
             self.do_container_collection(timestamp)
         if not ('localadmin' in self.collect
@@ -810,3 +815,4 @@ class MembershipEnumerator(object):
                 or 'loggedon' in self.collect
                 or 'experimental' in self.collect):
             self.enumerate_computers_dconly(timestamp)
+            self.addomain.save_cachefile(cachefile=timestamp + "additionnal_cache.json")

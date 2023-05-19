@@ -65,7 +65,7 @@ def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
     for ace_object in sd.dacl.aces:
         if ace_object.ace.AceType != 0x05 and ace_object.ace.AceType != 0x00:
             # These are the only two aces we care about currently
-            logging.debug('Don\'t care about acetype %d', ace_object.ace.AceType)
+            #logging.debug('Don\'t care about acetype %d', ace_object.ace.AceType)
             continue
         # Check if sid is ignored
         sid = str(ace_object.acedata.sid)
@@ -192,7 +192,7 @@ def parse_binary_acl(entry, entrytype, acl, objecttype_guid_map):
             if not ace_object.has_flag(ACE.INHERITED_ACE) and ace_object.has_flag(ACE.INHERIT_ONLY_ACE):
                 # ACE is set on this object, but only inherited, so not applicable to us
                 continue
-            
+
             if mask.has_priv(ACCESS_MASK.GENERIC_ALL):
                 # Generic all includes all other rights, so skip from here
                 relations.append(build_relation(sid, 'GenericAll', inherited=is_inherited))

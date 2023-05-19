@@ -98,15 +98,16 @@ class ADAuthentication(object):
             except Exception as exc:
                 if self.auth_method == 'auto':
                     logging.debug(traceback.format_exc())
-                    logging.info('Kerberos auth to LDAP failed, trying NTLM')
+                    logging.info('Kerberos auth to LDAP failed, NOT trying NTLM')
+                    raise exc
                     bound = False
                 else:
                     logging.debug('Kerberos auth to LDAP failed, no authentication methods left')
 
-        if not bound:
-            conn = Connection(server, user=ldaplogin, auto_referrals=False, password=ldappass, authentication=NTLM)
-            logging.debug('Authenticating to LDAP server with NTLM')
-            bound = conn.bind()
+        #if not bound:
+        #    conn = Connection(server, user=ldaplogin, auto_referrals=False, password=ldappass, authentication=NTLM)
+        #    logging.debug('Authenticating to LDAP server with NTLM')
+        #    bound = conn.bind()
 
         if not bound:
             result = conn.result

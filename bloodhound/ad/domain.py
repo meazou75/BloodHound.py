@@ -39,7 +39,7 @@ from bloodhound.ad.computer import ADComputer
 from bloodhound.enumeration.objectresolver import ObjectResolver
 from future.utils import itervalues, iteritems, native_str
 
-
+from ldap3.utils.conv import escape_filter_chars
 
 """
 Active Directory Domain Controller
@@ -60,11 +60,13 @@ class ADDC(ADComputer):
         # last request timestamp
         self.last_search_ts = time()
         # minimum time between searches
-        self.min_search_delay = 2
-        # request counter
-        self.query_counter = 0
+        self.min_search_delay = 1
         # max rate
-        self.max_result_rate = 100
+        self.max_result_rate = 20
+        # max batch size
+        self.max_batch_size = 100
+        # page size
+        self.page_size = 100
 
 
     def ldap_connect(self, protocol='ldap', resolver=False):
@@ -133,6 +135,7 @@ class ADDC(ADComputer):
         """
         Search for objects in LDAP or Global Catalog LDAP.
         """
+        logging.debug(f"Searching {search_filter}")
         if self.ldap is None and not use_resolver:
             self.ldap_connect(resolver=use_resolver)
         if self.resolverldap is None and use_resolver:
@@ -162,18 +165,19 @@ class ADDC(ADComputer):
                 searcher = self.ldap
 
         hadresults = False
+        while time() - self.last_search_ts < self.min_search_delay:
+            sleep(0.1)
         sresult = searcher.extend.standard.paged_search(search_base,
                                                         search_filter,
                                                         attributes=attributes,
-                                                        paged_size=50,
+                                                        paged_size=self.page_size,
                                                         search_scope=search_scope,
                                                         controls=controls,
                                                         generator=generator)
+        self.last_search_ts = time()
         try:
             # Use a generator for the result regardless of if the search function uses one
             start = time()
-            while time() - self.last_search_ts < self.min_search_delay:
-                sleep(0.9)
             query_counter = 0
             for e in sresult:
                 if e['type'] != 'searchResEntry':
@@ -184,7 +188,6 @@ class ADDC(ADComputer):
                     sleep(0.9)
                 query_counter += 1
                 yield e
-            self.last_search_ts = time()
         except LDAPNoSuchObjectResult:
             # This may indicate the object doesn't exist or access is denied
             logging.warning('LDAP Server reported that the search in %s for %s does not exist.', search_base, search_filter)
@@ -219,15 +222,21 @@ class ADDC(ADComputer):
         if attributes is None or attributes == []:
             attributes = ALL_ATTRIBUTES
         try:
+            while time() - self.last_search_ts < self.min_search_delay:
+                sleep(0.1)
             sresult = searcher.extend.standard.paged_search(qobject,
                                                             '(objectClass=*)',
                                                             search_scope=BASE,
                                                             attributes=attributes,
-                                                            paged_size=10,
+                                                            paged_size=self.page_size,
                                                             generator=False)
+            self.last_search_ts = time()
         except LDAPNoSuchObjectResult:
             # This may indicate the object doesn't exist or access is denied
             logging.warning('LDAP Server reported that the object %s does not exist.', qobject)
+            return None
+        except Exception:
+            logging.warning('LDAP QUERY FAILED.', qobject)
             return None
         for e in sresult:
             if e['type'] != 'searchResEntry':
@@ -260,12 +269,14 @@ class ADDC(ADComputer):
         if self.ldap is None:
             self.ldap_connect()
 
+        while time() - self.last_search_ts < self.min_search_delay:
+            sleep(0.1)
         sresult = self.ldap.extend.standard.paged_search(self.ldap.server.info.other['schemaNamingContext'][0],
                                                          '(objectClass=*)',
+                                                         paged_size=self.page_size,
                                                          attributes=['name', 'schemaidguid'])
+        self.last_search_ts = time()
         start = time()
-        while time() - self.last_search_ts < self.min_search_delay:
-            sleep(0.9)
         query_counter = 0
         for res in sresult:
             while query_counter / (time() - start) > self.max_result_rate:
@@ -274,7 +285,6 @@ class ADDC(ADComputer):
             if res['attributes']['schemaIDGUID']:
                 guid = str(UUID(bytes_le=res['attributes']['schemaIDGUID']))
                 self.objecttype_guid_map[res['attributes']['name'].lower()] = guid
-        self.last_search_ts = time()
 
         if 'ms-mcs-admpwdexpirationtime' in self.objecttype_guid_map:
             logging.debug('Found LAPS attributes in schema')
@@ -386,16 +396,52 @@ class ADDC(ADComputer):
         return dncache, sidcache
 
     def get_groups(self, include_properties=False, acl=False):
+        query = '(objectClass=group)'
+        properties = ['sAMAccountName']
+        samaccountnames = list()
+        entries = self.search(query, properties, generator=True)
+        logging.debug('Counting groups...')
+        with open("all_group_names.txt", "w") as f:
+            for entry in entries:
+                samaccountnames.append(entry['attributes']['sAMAccountName'].lower())
+                f.write(entry['attributes']['sAMAccountName'] + ";" + entry['dn'] + "\n")
+        logging.debug(f'Counted {len(samaccountnames)} groups')
+
         properties = ['distinguishedName', 'samaccountname', 'samaccounttype', 'objectsid', 'member']
         if include_properties:
             properties += ['adminCount', 'description', 'whencreated']
         if acl:
             properties += ['nTSecurityDescriptor']
-        entries = self.search('(objectClass=group)',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
-        return entries
+
+        samaccountnames.sort()
+        allsamaccountnames = samaccountnames.copy()
+        results = list()
+        base_rate = self.max_result_rate
+        self.max_result_rate /= 5
+
+        while samaccountnames:
+            target = samaccountnames[0]
+            prefix = ""
+            while prefix != target and len(
+                [name for name in allsamaccountnames if name.startswith(prefix)]) > self.max_batch_size:
+                prefix += target[len(prefix)]
+            precise_query = f"(&{query}(sAMAccountName={escape_filter_chars(prefix)}*))"
+            entries = self.search(precise_query,
+                                  properties,
+                                  generator=True,
+                                  query_sd=acl)
+            for entry in entries:
+                results.append(entry)
+                samaccountname = entry['attributes']['sAMAccountName'].lower()
+                try:
+                    samaccountnames.remove(samaccountname)
+                except ValueError:
+                    logging.debug(f"{samaccountname} was just created")
+                if len(samaccountnames) % 1000 == 0:
+                    logging.debug(f"{len(samaccountnames)} groups left\r")
+
+        self.max_result_rate = base_rate
+        return results
 
     def get_gpos(self, include_properties=False, acl=False):
         properties = ['distinguishedName', 'name', 'objectGUID', 'gPCFileSysPath', 'displayName']
@@ -442,12 +488,16 @@ class ADDC(ADComputer):
             logging.debug('No support for GMSA, skipping in query')
             query = '(&(objectCategory=person)(objectClass=user))'
 
-        #first, get all user and gmsa accounts' names
+        # first, get all user and gmsa accounts' names
         properties = ['sAMAccountName']
         samaccountnames = list()
+        logging.debug('Counting users...')
         entries = self.search(query, properties, generator=True)
-        for entry in entries:
-            samaccountnames.append(entry['attributes']['sAMAccountName'])
+        with open("all_users_names.txt", "w") as f:
+            for entry in entries:
+                samaccountnames.append(entry['attributes']['sAMAccountName'].lower())
+                f.write(entry['attributes']['sAMAccountName'] + ";" + entry['dn'] + "\n")
+        logging.debug(f'Counted {len(samaccountnames)} users')
 
 
         properties = ['sAMAccountName', 'distinguishedName', 'sAMAccountType',
@@ -465,37 +515,51 @@ class ADDC(ADComputer):
         if acl:
             properties.append('nTSecurityDescriptor')
 
-
-        max_result_size = 25
-        final_entries = list()
-        samaccountnames = [name.lower() for name in samaccountnames]
+        base_rate = self.max_result_rate
+        self.max_result_rate /= 5
         samaccountnames.sort()
-
+        allsamaccountnames = samaccountnames.copy()
+        results = list()
         while samaccountnames:
             target = samaccountnames[0]
             prefix = ""
-            while prefix != target and len([name for name in samaccountnames if name.startswith(prefix)]) > max_result_size:
+            while prefix != target and len([name for name in allsamaccountnames if name.startswith(prefix)]) > self.max_batch_size:
                 prefix += target[len(prefix)]
-            precise_query = f"(&{query}(sAMAccountName={prefix}*))"
+            precise_query = f"(&{query}(sAMAccountName={escape_filter_chars(prefix)}*))"
             entries = self.search(precise_query,
                                   properties,
                                   generator=True,
                                   query_sd=acl)
             for entry in entries:
-                final_entries.append(entry)
+                results.append(entry)
                 samaccountname = entry['attributes']['sAMAccountName'].lower()
-                if samaccountname in samaccountnames:
+                try:
                     samaccountnames.remove(samaccountname)
+                except ValueError:
+                    logging.debug(f"{samaccountname} was just created")
+                if len(samaccountnames) % 1000 == 0:
+                    logging.debug(f"{len(samaccountnames)} users left\r")
 
+        self.max_result_rate = base_rate
 
-        return final_entries
-
+        return results
 
     def get_computers(self, include_properties=False, acl=False):
         """
         Get all computer objects. This purely gets them using LDAP. This function is used directly in case of DCOnly enum,
         or used to create a cache in case of computer enumeration later on.
         """
+
+        properties = ['sAMAccountName']
+        samaccountnames = list()
+        entries = self.search('(&(sAMAccountType=805306369))', properties, generator=True)
+        logging.debug('Counting computers...')
+        with open("all_computer_names.txt", "w") as f:
+            for entry in entries:
+                samaccountnames.append(entry['attributes']['sAMAccountName'].lower())
+                f.write(entry['attributes']['sAMAccountName'] + ";" + entry['dn'] + "\n")
+        logging.debug(f'Counted {len(samaccountnames)} users')
+
         properties = ['samaccountname', 'userAccountControl', 'distinguishedname',
                       'dnshostname', 'samaccounttype', 'objectSid', 'primaryGroupID',
                       'isDeleted']
@@ -514,12 +578,37 @@ class ADDC(ADComputer):
                 properties += ['nTSecurityDescriptor', 'ms-mcs-admpwdexpirationtime']
             else:
                 properties.append('nTSecurityDescriptor')
-        entries = self.search('(&(sAMAccountType=805306369))',
-                              properties,
-                              generator=True,
-                              query_sd=acl)
+        query = '(&(sAMAccountType=805306369))'
 
-        return entries
+        samaccountnames.sort()
+        allsamaccountnames = samaccountnames.copy()
+        results = list()
+        base_rate = self.max_result_rate
+        self.max_result_rate /= 5
+
+        while samaccountnames:
+            target = samaccountnames[0]
+            prefix = ""
+            while prefix != target and len(
+                [name for name in allsamaccountnames if name.startswith(prefix)]) > self.max_batch_size:
+                prefix += target[len(prefix)]
+            precise_query = f"(&{query}(sAMAccountName={escape_filter_chars(prefix)}*))"
+            entries = self.search(precise_query,
+                                  properties,
+                                  generator=True,
+                                  query_sd=acl)
+            for entry in entries:
+                samaccountname = entry['attributes']['sAMAccountName'].lower()
+                try:
+                    samaccountnames.remove(samaccountname)
+                except ValueError:
+                    logging.debug(f"{samaccountname} was just created")
+                results.append(entry)
+                if len(samaccountnames) % 1000 == 0:
+                    logging.debug(f"{len(samaccountnames)} computers left\r")
+
+        self.max_result_rate = base_rate
+        return results
 
     def get_computers_withcache(self, include_properties=False, acl=False):
         """
@@ -680,7 +769,10 @@ class AD(object):
         logging.info('Loaded cached DNs and SIDs from cachefile')
 
     def save_cachefile(self, cachefile):
-        pass
+        caches = {'dncache': self.dncache, 'sidcache': self.newsidcache._cache}
+        with codecs.open(cachefile, 'w', 'utf-8') as outfile:
+            json.dump(caches, outfile)
+        logging.info(f'Saved cached DNs and SIDs to {cachefile}')
 
     def dns_resolve(self, domain=None, options=None):
         logging.debug('Querying domain controller information from DNS')

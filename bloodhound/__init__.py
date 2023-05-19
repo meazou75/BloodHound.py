@@ -26,6 +26,7 @@ import os, sys, logging, argparse, getpass, time, re, datetime
 from zipfile import ZipFile
 from bloodhound.ad.domain import AD, ADDC
 from bloodhound.ad.authentication import ADAuthentication
+from bloodhound.ad.utils import ADUtils
 from bloodhound.enumeration.computers import ComputerEnumerator
 from bloodhound.enumeration.memberships import MembershipEnumerator
 from bloodhound.enumeration.domains import DomainEnumerator
@@ -34,10 +35,10 @@ from bloodhound.enumeration.domains import DomainEnumerator
 BloodHound.py is a Python port of BloodHound, designed to run on Linux and Windows.
 """
 class BloodHound(object):
-    def __init__(self, ad):
+    def __init__(self, ad: AD):
         self.ad = ad
         self.ldap = None
-        self.pdc = None
+        self.pdc: ADDC = None
         self.sessions = []
 
 
@@ -61,6 +62,7 @@ class BloodHound(object):
 
         # Create a domain controller object
         self.pdc = ADDC(pdc, self.ad)
+
         # Create an object resolver
         self.ad.create_objectresolver(self.pdc)
 #        self.pdc.ldap_connect(self.ad.auth.username, self.ad.auth.password, kdc)
